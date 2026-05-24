@@ -1,8 +1,10 @@
 # quat_cube_modern_gl.py
 
+import argparse
 import threading
 import math
 import serial
+import time
 import glfw
 import moderngl
 import numpy as np
@@ -14,6 +16,11 @@ BAUD_RATE   = 256000   # match this to your Arduino Serial.begin()
 
 # Shared quaternion [w, x, y, z]
 quat = [1.0, 0.0, 0.0, 0.0]
+quat_lock = threading.Lock()
+serial_stats = {
+    "packets": 0,
+    "last_recv_ns": None,
+}
 
 # ─── FLAT SHADERS ─────────────────────────────────────────────────────────────────
 VERT_SHADER = '''
@@ -70,12 +77,53 @@ def serial_reader():
             x = float(parts[1].split(":")[1])
             y = float(parts[2].split(":")[1])
             z = float(parts[3].split(":")[1])
-            quat = [w, x, y, z]
+            with quat_lock:
+                quat = [w, x, y, z]
+                serial_stats["packets"] += 1
+                serial_stats["last_recv_ns"] = time.time_ns()
         except (IndexError, ValueError):
             pass
 
+
+def get_quat():
+    with quat_lock:
+        return tuple(quat)
+
+
+def get_stats_snapshot():
+    with quat_lock:
+        return dict(serial_stats)
+
+
+def positive_float(value):
+    number = float(value)
+    if number <= 0.0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Render the quaternion cube from the COM-port text stream."
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print render FPS, serial receive rate, and latest-packet age.",
+    )
+    parser.add_argument(
+        "--stats-interval",
+        type=positive_float,
+        default=1.0,
+        help="Seconds between --stats reports. Default: 1.0",
+    )
+    return parser.parse_args()
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────────
 def main():
+    args = parse_args()
+
     # start serial thread
     threading.Thread(target=serial_reader, daemon=True).start()
 
@@ -102,9 +150,14 @@ def main():
     vbo = ctx.buffer(vertices.tobytes())
     vao = ctx.vertex_array(prog, [(vbo, '3f', 'in_pos')])
 
+    frame_count = 0
+    last_stats_time = time.perf_counter()
+    last_stats_packets = 0
+
     while not glfw.window_should_close(window):
         glfw.poll_events()
         ctx.clear(0.2, 0.2, 0.2)
+        frame_count += 1
 
         # build projection & camera (static)
         proj = Matrix44.perspective_projection(45.0, 1.0, 0.1, 100.0)
@@ -113,7 +166,7 @@ def main():
         )
 
         # quaternion → rotation matrix
-        w, x, y, z = quat
+        w, x, y, z = get_quat()
         # Note: pyrr.Quaternion takes (x, y, z, w)
         q = Quaternion([x, y, z, w])
         rot = Matrix44.from_quaternion(q)
@@ -124,6 +177,36 @@ def main():
 
         vao.render()
         glfw.swap_buffers(window)
+
+        if args.stats:
+            now = time.perf_counter()
+            elapsed = now - last_stats_time
+            if elapsed >= args.stats_interval:
+                stats = get_stats_snapshot()
+                packet_delta = stats["packets"] - last_stats_packets
+                render_fps = frame_count / elapsed
+                rx_hz = packet_delta / elapsed
+                last_recv_ns = stats["last_recv_ns"]
+                latest_age_ms = (
+                    (time.time_ns() - last_recv_ns) / 1_000_000.0
+                    if last_recv_ns is not None
+                    else None
+                )
+                age_text = (
+                    "n/a" if latest_age_ms is None else f"{latest_age_ms:.2f}"
+                )
+                print(
+                    "serial cube stats "
+                    f"render_fps:{render_fps:.1f} "
+                    f"rx_hz:{rx_hz:.1f} "
+                    f"latest_age_ms:{age_text} "
+                    f"packets:{stats['packets']}",
+                    flush=True,
+                )
+
+                frame_count = 0
+                last_stats_time = now
+                last_stats_packets = stats["packets"]
 
     glfw.terminate()
 

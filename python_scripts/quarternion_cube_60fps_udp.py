@@ -4,6 +4,7 @@ import argparse
 import re
 import socket
 import threading
+import time
 
 import glfw
 import moderngl
@@ -18,6 +19,24 @@ RECV_TIMEOUT_SECONDS = 0.25
 # Shared quaternion [w, x, y, z]
 quat = [1.0, 0.0, 0.0, 0.0]
 quat_lock = threading.Lock()
+latest_sample = {
+    "quat": tuple(quat),
+    "seq": None,
+    "sent_ns": None,
+    "pose": None,
+    "pose_ns": None,
+    "recv_ns": None,
+}
+receiver_stats = {
+    "packets": 0,
+    "dropped": 0,
+    "last_seq": None,
+    "latency_count": 0,
+    "latency_sum_ms": 0.0,
+    "latency_max_ms": 0.0,
+    "last_pose": None,
+    "last_pose_latency_ms": None,
+}
 
 QUAT_LINE_RE = re.compile(
     r"\bw\s*:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s+"
@@ -25,6 +44,7 @@ QUAT_LINE_RE = re.compile(
     r"y\s*:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s+"
     r"z\s*:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 )
+TOKEN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^\s]+)")
 
 # FLAT SHADERS
 VERT_SHADER = '''
@@ -77,20 +97,73 @@ def parse_quaternion_line(line):
         return None
 
     try:
-        return [float(value) for value in match.groups()]
+        sample = {"quat": [float(value) for value in match.groups()]}
     except ValueError:
         return None
 
+    for key, value in TOKEN_RE.findall(line):
+        if key in {"seq", "sent_ns", "pose", "pose_ns"}:
+            try:
+                sample[key] = int(value)
+            except ValueError:
+                pass
 
-def set_quat(next_quat):
-    global quat
+    return sample
+
+
+def set_sample(sample):
+    global latest_sample, quat
+    recv_ns = time.time_ns()
+    next_quat = sample["quat"]
+
     with quat_lock:
         quat = next_quat
+        latest_sample = {
+            "quat": tuple(next_quat),
+            "seq": sample.get("seq"),
+            "sent_ns": sample.get("sent_ns"),
+            "pose": sample.get("pose"),
+            "pose_ns": sample.get("pose_ns"),
+            "recv_ns": recv_ns,
+        }
+
+        receiver_stats["packets"] += 1
+
+        seq = sample.get("seq")
+        last_seq = receiver_stats["last_seq"]
+        if seq is not None:
+            if last_seq is not None and seq > last_seq + 1:
+                receiver_stats["dropped"] += seq - last_seq - 1
+            receiver_stats["last_seq"] = seq
+
+        sent_ns = sample.get("sent_ns")
+        if sent_ns is not None:
+            latency_ms = (recv_ns - sent_ns) / 1_000_000.0
+            if latency_ms >= 0.0:
+                receiver_stats["latency_count"] += 1
+                receiver_stats["latency_sum_ms"] += latency_ms
+                receiver_stats["latency_max_ms"] = max(
+                    receiver_stats["latency_max_ms"], latency_ms
+                )
+
+        pose = sample.get("pose")
+        if pose is not None and pose != receiver_stats["last_pose"]:
+            receiver_stats["last_pose"] = pose
+            pose_ns = sample.get("pose_ns")
+            if pose_ns is not None:
+                receiver_stats["last_pose_latency_ms"] = (
+                    recv_ns - pose_ns
+                ) / 1_000_000.0
 
 
 def get_quat():
     with quat_lock:
         return tuple(quat)
+
+
+def get_stats_snapshot():
+    with quat_lock:
+        return dict(latest_sample), dict(receiver_stats)
 
 
 def udp_quaternion_reader(host, port):
@@ -107,9 +180,16 @@ def udp_quaternion_reader(host, port):
 
         text = payload.decode("utf-8", errors="ignore")
         for line in text.splitlines():
-            next_quat = parse_quaternion_line(line.strip())
-            if next_quat is not None:
-                set_quat(next_quat)
+            sample = parse_quaternion_line(line.strip())
+            if sample is not None:
+                set_sample(sample)
+
+
+def positive_float(value):
+    number = float(value)
+    if number <= 0.0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
 
 
 def parse_args():
@@ -129,6 +209,17 @@ def parse_args():
         type=int,
         default=UDP_PORT,
         help=f"UDP port to listen on. Default: {UDP_PORT}",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print render, receive-rate, packet-age, and latency diagnostics.",
+    )
+    parser.add_argument(
+        "--stats-interval",
+        type=positive_float,
+        default=1.0,
+        help="Seconds between --stats reports. Default: 1.0",
     )
     return parser.parse_args()
 
@@ -166,9 +257,14 @@ def main():
     vbo = ctx.buffer(vertices.tobytes())
     vao = ctx.vertex_array(prog, [(vbo, '3f', 'in_pos')])
 
+    frame_count = 0
+    last_stats_time = time.perf_counter()
+    last_stats_packets = 0
+
     while not glfw.window_should_close(window):
         glfw.poll_events()
         ctx.clear(0.2, 0.2, 0.2)
+        frame_count += 1
 
         # build projection & camera (static)
         proj = Matrix44.perspective_projection(45.0, 1.0, 0.1, 100.0)
@@ -188,6 +284,50 @@ def main():
 
         vao.render()
         glfw.swap_buffers(window)
+
+        if args.stats:
+            now = time.perf_counter()
+            elapsed = now - last_stats_time
+            if elapsed >= args.stats_interval:
+                sample, stats = get_stats_snapshot()
+                packets = stats["packets"]
+                packet_delta = packets - last_stats_packets
+                render_fps = frame_count / elapsed
+                rx_hz = packet_delta / elapsed
+                recv_ns = sample.get("recv_ns")
+                latest_age_ms = (
+                    (time.time_ns() - recv_ns) / 1_000_000.0
+                    if recv_ns is not None
+                    else None
+                )
+                latency_count = stats["latency_count"]
+                avg_latency_ms = (
+                    stats["latency_sum_ms"] / latency_count
+                    if latency_count
+                    else None
+                )
+
+                def ms_text(value):
+                    return "n/a" if value is None else f"{value:.2f}"
+
+                print(
+                    "cube stats "
+                    f"render_fps:{render_fps:.1f} "
+                    f"rx_hz:{rx_hz:.1f} "
+                    f"latest_age_ms:{ms_text(latest_age_ms)} "
+                    f"avg_rx_latency_ms:{ms_text(avg_latency_ms)} "
+                    f"max_rx_latency_ms:{stats['latency_max_ms']:.2f} "
+                    "last_pose_latency_ms:"
+                    f"{ms_text(stats['last_pose_latency_ms'])} "
+                    f"dropped:{stats['dropped']} "
+                    f"seq:{sample.get('seq')} "
+                    f"pose:{sample.get('pose')}",
+                    flush=True,
+                )
+
+                frame_count = 0
+                last_stats_time = now
+                last_stats_packets = packets
 
     glfw.terminate()
 

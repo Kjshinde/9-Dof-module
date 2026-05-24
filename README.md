@@ -230,13 +230,13 @@ simulator in two terminals.
 Terminal 1:
 
 ```bash
-python python_scripts/quarternion_cube_60fps_udp.py
+python python_scripts/quarternion_cube_60fps_udp.py --stats
 ```
 
 Terminal 2:
 
 ```bash
-python python_scripts/simulated_quaternion_source.py --print
+python python_scripts/simulated_quaternion_source.py --stats
 ```
 
 Defaults:
@@ -250,6 +250,34 @@ Both scripts accept `--host` and `--port` if you need to change the UDP
 endpoint. The simulator also supports `--rate-hz` and `--duration`. It now
 cycles through a fixed list of roll/pitch/yaw poses, which is useful for
 checking how quickly the cube responds to sudden orientation changes.
+
+The simulator includes `seq`, `sent_ns`, `pose`, and `pose_ns` metadata in each
+UDP frame. The cube ignores those fields for rendering but uses them in
+`--stats` mode to report:
+
+- `rx_hz`: how many packets the cube receives per second.
+- `latest_age_ms`: how old the newest received packet is.
+- `avg_rx_latency_ms` / `max_rx_latency_ms`: sender-to-cube receive latency.
+- `last_pose_latency_ms`: delay from a simulated pose jump to cube receipt.
+- `dropped`: sequence gaps seen by the cube.
+
+If `source stats sent_hz` is near the requested rate and `cube stats rx_hz`
+matches it with low packet age and low pose latency, the local data pipeline is
+responding quickly. If the hardware path later feels slow while the simulated
+path is fast, the bottleneck is likely hardware sampling, sensor fusion, or
+serial emission cadence. If `rx_hz` falls behind or packet age grows in the
+simulated path, investigate the Python receive/render pipeline.
+
+For hardware serial testing, the ModernGL serial cube also supports:
+
+```bash
+python python_scripts/quarternion_cube_60fps.py --stats
+```
+
+This reports render FPS, serial `rx_hz`, latest-packet age, and total packet
+count. It cannot compute sender-to-receiver latency unless the Arduino text
+stream also includes a timestamp, but it does tell you whether the host is
+receiving fresh hardware samples quickly.
 
 ## Code Review Notes
 
