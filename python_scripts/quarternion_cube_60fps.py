@@ -82,6 +82,11 @@ def main():
     # init glfw + GL context
     if not glfw.init():
         return
+    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
+
     window = glfw.create_window(640, 640, "Quat Cube", None, None)
     if not window:
         glfw.terminate()

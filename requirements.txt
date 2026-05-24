@@ -1,0 +1,8 @@
+glfw
+moderngl
+numpy
+pygame
+PyOpenGL
+pyrr
+pyserial
+vpython
