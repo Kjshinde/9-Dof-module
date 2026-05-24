@@ -8,6 +8,17 @@ import time
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5005
 DEFAULT_RATE_HZ = 1000.0 / 16.0
+STEP_INTERVAL_SECONDS = 0.75
+STEP_POSES_DEGREES = (
+    (0.0, 0.0, 0.0),
+    (70.0, 0.0, 0.0),
+    (-70.0, 25.0, 0.0),
+    (0.0, -55.0, 90.0),
+    (45.0, 45.0, -120.0),
+    (-35.0, -45.0, 170.0),
+    (85.0, -15.0, -45.0),
+    (0.0, 60.0, 135.0),
+)
 
 
 def quaternion_from_euler(roll, pitch, yaw):
@@ -27,12 +38,26 @@ def quaternion_from_euler(roll, pitch, yaw):
     return qw, qx, qy, qz
 
 
-def simulated_orientation(elapsed_seconds):
+def smooth_simulated_orientation(elapsed_seconds):
     """Generate a smooth, IMU-like orientation that keeps the cube moving."""
     roll = math.radians(35.0) * math.sin(elapsed_seconds * 0.9)
     pitch = math.radians(25.0) * math.sin(elapsed_seconds * 0.55 + 0.8)
     yaw = elapsed_seconds * 0.7
     return quaternion_from_euler(roll, pitch, yaw)
+
+
+def simulated_orientation(elapsed_seconds):
+    """Generate abrupt pose changes to test how quickly the cube responds."""
+    pose_index = int(elapsed_seconds / STEP_INTERVAL_SECONDS)
+    roll_deg, pitch_deg, yaw_deg = STEP_POSES_DEGREES[
+        pose_index % len(STEP_POSES_DEGREES)
+    ]
+
+    return quaternion_from_euler(
+        math.radians(roll_deg),
+        math.radians(pitch_deg),
+        math.radians(yaw_deg),
+    )
 
 
 def format_quaternion_line(quat):

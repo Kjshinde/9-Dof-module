@@ -243,10 +243,13 @@ Defaults:
 
 - UDP host: `127.0.0.1`
 - UDP port: `5005`
-- Simulation rate: about `62.5 Hz`
+- Simulation send rate: about `62.5 Hz`
+- Simulation pose pattern: abrupt stepped poses every `0.75` seconds
 
 Both scripts accept `--host` and `--port` if you need to change the UDP
-endpoint. The simulator also supports `--rate-hz` and `--duration`.
+endpoint. The simulator also supports `--rate-hz` and `--duration`. It now
+cycles through a fixed list of roll/pitch/yaw poses, which is useful for
+checking how quickly the cube responds to sudden orientation changes.
 
 ## Code Review Notes
 
@@ -268,6 +271,10 @@ endpoint. The simulator also supports `--rate-hz` and `--duration`.
 - The ModernGL scripts request an OpenGL 3.3 core profile, which matches their
   shader version. If a machine cannot create that context, use the Pygame or
   VPython visualizer path instead.
+- `simulated_quaternion_source.py` still contains
+  `smooth_simulated_orientation(...)`, but the CLI currently always uses the
+  stepped `simulated_orientation(...)` function. Add a mode flag if both
+  simulator patterns should be available from the command line.
 
 ## Troubleshooting
 
